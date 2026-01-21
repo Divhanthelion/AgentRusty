@@ -1,1 +1,4 @@
-/target
+.claude/
+.kiro/
+*.DS_Store
+target/
