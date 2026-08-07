@@ -11,16 +11,12 @@ pub enum Action {
     SessionsUpdated(Vec<TmuxSession>),
     /// An error occurred
     Error(String),
-    /// Request to quit the application
-    Quit,
     /// Attach to a session
     AttachSession(String),
     /// Create a new session
     CreateSession(String),
     /// Delete a session
     DeleteSession(String),
-    /// Toggle MCP mode
-    ToggleMcpMode,
     /// Copy skeleton map to clipboard
     CopySkeleton,
 }

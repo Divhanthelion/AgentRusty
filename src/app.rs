@@ -4,14 +4,14 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Clear},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
     Frame,
 };
 
 use crate::actions::Action;
 use crate::tmux::{AgentStatus, TmuxSession};
 
-/// Theme colors inspired by Claude Code
+/// Theme colors for the dashboard
 pub struct Theme {
     pub bg: Color,
     pub fg: Color,
@@ -27,13 +27,20 @@ impl Default for Theme {
         Self {
             bg: Color::Rgb(30, 30, 30),
             fg: Color::Rgb(220, 220, 220),
-            accent: Color::Rgb(217, 119, 87), // Claude orange
+            accent: Color::Rgb(217, 119, 87),
             dim: Color::Rgb(100, 100, 100),
             success: Color::Rgb(80, 200, 120),
             warning: Color::Rgb(255, 193, 7),
             error: Color::Rgb(220, 53, 69),
         }
     }
+}
+
+/// Kind of status toast in the footer
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageKind {
+    Success,
+    Error,
 }
 
 /// Input mode for the application
@@ -50,10 +57,8 @@ pub struct App {
     pub sessions: Vec<TmuxSession>,
     /// Currently selected session index
     pub list_state: ListState,
-    /// Current message to display (info or error)
-    pub error_message: Option<String>,
-    /// Whether MCP mode is active
-    pub mcp_mode: bool,
+    /// Footer toast message
+    pub status_message: Option<(String, MessageKind)>,
     /// Theme
     pub theme: Theme,
     /// Current input mode
@@ -72,13 +77,20 @@ impl App {
         Self {
             sessions: Vec::new(),
             list_state,
-            error_message: None,
-            mcp_mode: false,
+            status_message: None,
             theme: Theme::default(),
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             pending_actions: Vec::new(),
         }
+    }
+
+    pub fn set_success(&mut self, msg: String) {
+        self.status_message = Some((msg, MessageKind::Success));
+    }
+
+    pub fn set_error(&mut self, msg: String) {
+        self.status_message = Some((msg, MessageKind::Error));
     }
 
     /// Get the currently selected session
@@ -97,29 +109,50 @@ impl App {
     pub fn handle_action(&mut self, action: Action) -> Result<bool> {
         match action {
             Action::KeyPress(key) => self.handle_key(key),
-            Action::SessionsUpdated(sessions) => {
+            Action::SessionsUpdated(mut sessions) => {
+                // WaitingForInput first so permission prompts are easy to spot
+                sessions.sort_by_key(|s| match s.status {
+                    AgentStatus::WaitingForInput => 0,
+                    AgentStatus::Error => 1,
+                    AgentStatus::Busy => 2,
+                    AgentStatus::Idle => 3,
+                    AgentStatus::Unknown => 4,
+                });
+
+                // Preserve selection by session id when possible
+                let selected_id = self.selected_session().map(|s| s.id.clone());
                 self.sessions = sessions;
-                // Ensure selection is valid
-                if let Some(selected) = self.list_state.selected() {
-                    if selected >= self.sessions.len() && !self.sessions.is_empty() {
-                        self.list_state.select(Some(self.sessions.len() - 1));
+
+                if let Some(id) = selected_id {
+                    if let Some(idx) = self.sessions.iter().position(|s| s.id == id) {
+                        self.list_state.select(Some(idx));
+                    } else if self.sessions.is_empty() {
+                        self.list_state.select(None);
+                    } else {
+                        self.list_state.select(Some(0));
                     }
+                } else if self.sessions.is_empty() {
+                    self.list_state.select(None);
+                } else if self.list_state.selected().is_none() {
+                    self.list_state.select(Some(0));
+                } else if let Some(selected) = self.list_state.selected()
+                    && selected >= self.sessions.len()
+                {
+                    self.list_state.select(Some(self.sessions.len() - 1));
                 }
                 Ok(false)
             }
             Action::Error(msg) => {
-                self.error_message = Some(msg);
+                self.set_error(msg);
                 Ok(false)
             }
-            Action::Quit => Ok(true),
             _ => Ok(false),
         }
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
-        // Clear error message on any key press
-        if self.error_message.is_some() && self.input_mode == InputMode::Normal {
-            self.error_message = None;
+        if self.status_message.is_some() && self.input_mode == InputMode::Normal {
+            self.status_message = None;
         }
 
         match self.input_mode {
@@ -134,7 +167,6 @@ impl App {
             KeyCode::Char('q') => return Ok(true),
             KeyCode::Char('j') | KeyCode::Down => self.next_session(),
             KeyCode::Char('k') | KeyCode::Up => self.previous_session(),
-            KeyCode::Char('M') => self.mcp_mode = !self.mcp_mode,
             KeyCode::Enter => {
                 if let Some(session) = self.selected_session() {
                     self.pending_actions
@@ -176,7 +208,6 @@ impl App {
                 self.input_mode = InputMode::Normal;
             }
             KeyCode::Char(c) => {
-                // Only allow valid session name characters
                 if c.is_alphanumeric() || c == '-' || c == '_' {
                     self.input_buffer.push(c);
                 }
@@ -241,20 +272,25 @@ impl App {
     }
 
     pub fn render(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        frame.render_widget(
+            Block::default().style(Style::default().bg(self.theme.bg)),
+            area,
+        );
+
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(3), // Header
-                Constraint::Min(0),    // Main content
-                Constraint::Length(3), // Footer/status
+                Constraint::Length(3),
+                Constraint::Min(0),
+                Constraint::Length(3),
             ])
-            .split(frame.area());
+            .split(area);
 
         self.render_header(frame, chunks[0]);
         self.render_main(frame, chunks[1]);
         self.render_footer(frame, chunks[2]);
 
-        // Render modal dialogs on top
         match self.input_mode {
             InputMode::Creating => self.render_create_dialog(frame),
             InputMode::Confirming => self.render_confirm_dialog(frame),
@@ -286,14 +322,21 @@ impl App {
     fn render_main(&mut self, frame: &mut Frame, area: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(40), // Session list
-                Constraint::Percentage(60), // Detail pane
-            ])
+            .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
             .split(area);
 
         self.render_session_list(frame, chunks[0]);
         self.render_detail_pane(frame, chunks[1]);
+    }
+
+    fn status_label(status: AgentStatus) -> &'static str {
+        match status {
+            AgentStatus::Busy => "Busy",
+            AgentStatus::Idle => "Idle",
+            AgentStatus::WaitingForInput => "Needs input",
+            AgentStatus::Error => "Error",
+            AgentStatus::Unknown => "Unknown",
+        }
     }
 
     fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
@@ -313,9 +356,12 @@ impl App {
                         AgentStatus::Idle => {
                             Span::styled("● ", Style::default().fg(self.theme.success))
                         }
-                        AgentStatus::WaitingForInput => {
-                            Span::styled("? ", Style::default().fg(self.theme.accent))
-                        }
+                        AgentStatus::WaitingForInput => Span::styled(
+                            "! ",
+                            Style::default()
+                                .fg(self.theme.accent)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         AgentStatus::Error => {
                             Span::styled("✗ ", Style::default().fg(self.theme.error))
                         }
@@ -324,9 +370,19 @@ impl App {
                         }
                     };
 
-                    let name = Span::styled(&session.name, Style::default().fg(self.theme.fg));
+                    let mut spans = vec![
+                        status_icon,
+                        Span::styled(session.name.clone(), Style::default().fg(self.theme.fg)),
+                    ];
 
-                    ListItem::new(Line::from(vec![status_icon, name]))
+                    if session.status == AgentStatus::WaitingForInput {
+                        spans.push(Span::styled(
+                            "  needs you",
+                            Style::default().fg(self.theme.accent),
+                        ));
+                    }
+
+                    ListItem::new(Line::from(spans))
                 })
                 .collect()
         };
@@ -350,6 +406,12 @@ impl App {
 
     fn render_detail_pane(&self, frame: &mut Frame, area: Rect) {
         let content = if let Some(session) = self.selected_session() {
+            let attached_text = if session.attached {
+                format!("yes ({})", session.attached_clients)
+            } else {
+                "no".to_string()
+            };
+
             vec![
                 Line::from(vec![
                     Span::styled("Name: ", Style::default().fg(self.theme.dim)),
@@ -362,7 +424,7 @@ impl App {
                 Line::from(vec![
                     Span::styled("Status: ", Style::default().fg(self.theme.dim)),
                     Span::styled(
-                        format!("{:?}", session.status),
+                        Self::status_label(session.status),
                         Style::default().fg(match session.status {
                             AgentStatus::Busy => self.theme.warning,
                             AgentStatus::Idle => self.theme.success,
@@ -373,15 +435,16 @@ impl App {
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled("Clients: ", Style::default().fg(self.theme.dim)),
-                    Span::styled(
-                        session.attached_clients.to_string(),
-                        Style::default().fg(self.theme.fg),
-                    ),
+                    Span::styled("Attached: ", Style::default().fg(self.theme.dim)),
+                    Span::styled(attached_text, Style::default().fg(self.theme.fg)),
                 ]),
                 Line::from(""),
                 Line::from(Span::styled(
                     "Press Enter to attach, 'd' to delete",
+                    Style::default().fg(self.theme.dim),
+                )),
+                Line::from(Span::styled(
+                    "Status is best-effort from pane scrape",
                     Style::default().fg(self.theme.dim),
                 )),
             ]
@@ -409,17 +472,13 @@ impl App {
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
-        let help_text = if self.mcp_mode {
-            " MCP Mode │ Space: Toggle │ Esc: Exit "
-        } else {
-            " q: Quit │ j/k: Navigate │ Enter: Attach │ n: New │ d: Delete │ y: Copy skeleton │ M: MCP "
-        };
+        let help_text =
+            " q: Quit │ j/k: Navigate │ Enter: Attach │ n: New │ d: Delete │ y: Copy skeleton ";
 
-        let content = if let Some(ref msg) = self.error_message {
-            let style = if msg.contains("copied") || msg.contains("success") {
-                Style::default().fg(self.theme.success)
-            } else {
-                Style::default().fg(self.theme.error)
+        let content = if let Some((ref msg, kind)) = self.status_message {
+            let style = match kind {
+                MessageKind::Success => Style::default().fg(self.theme.success),
+                MessageKind::Error => Style::default().fg(self.theme.error),
             };
             Line::from(Span::styled(format!(" {} ", msg), style))
         } else {
@@ -461,6 +520,10 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
+            Line::from(Span::styled(
+                "Creates an empty tmux session — launch your agent inside.",
+                Style::default().fg(self.theme.dim),
+            )),
             Line::from(Span::styled(
                 "Press Enter to create, Esc to cancel",
                 Style::default().fg(self.theme.dim),
@@ -509,6 +572,12 @@ impl App {
 
         let paragraph = Paragraph::new(text);
         frame.render_widget(paragraph, inner);
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

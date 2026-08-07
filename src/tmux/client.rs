@@ -18,26 +18,14 @@ impl TmuxClient {
         }
     }
 
-    /// Check if tmux server is running
-    pub async fn is_server_running(&self) -> bool {
-        Command::new(&self.tmux_path)
-            .arg("list-sessions")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false)
-    }
-
     /// List all tmux sessions
     pub async fn list_sessions(&self) -> Result<Vec<TmuxSession>> {
-        // Format: session_id|session_name|session_created|session_attached
+        // session_attached is 1/0; session_attached_list is CSV of client ttys when attached
         let output = Command::new(&self.tmux_path)
             .args([
                 "list-sessions",
                 "-F",
-                "#{session_id}|#{session_name}|#{session_created}|#{session_attached}",
+                "#{session_id}|#{session_name}|#{session_created}|#{session_attached}|#{session_attached_list}",
             ])
             .output()
             .await
@@ -64,7 +52,7 @@ impl TmuxClient {
     }
 
     async fn parse_session_line(&self, line: &str) -> Option<TmuxSession> {
-        let parts: Vec<&str> = line.split('|').collect();
+        let parts: Vec<&str> = line.splitn(5, '|').collect();
         if parts.len() < 4 {
             return None;
         }
@@ -72,15 +60,25 @@ impl TmuxClient {
         let id = parts[0].to_string();
         let name = parts[1].to_string();
         let created_at = parts[2].parse().unwrap_or(0);
-        let attached_clients = parts[3].parse().unwrap_or(0);
+        let attached_flag: u8 = parts[3].parse().unwrap_or(0);
+        let attached_list = parts.get(4).copied().unwrap_or("");
+        let attached = attached_flag != 0;
+        let attached_clients = if attached_list.is_empty() {
+            if attached { 1 } else { 0 }
+        } else {
+            attached_list.split(',').filter(|s| !s.is_empty()).count()
+        };
 
-        // Get pane content for status detection
-        let status = self.get_session_status(&id).await.unwrap_or(AgentStatus::Unknown);
+        let status = self
+            .get_session_status(&id)
+            .await
+            .unwrap_or(AgentStatus::Unknown);
 
         Some(TmuxSession {
             id,
             name,
             created_at,
+            attached,
             attached_clients,
             status,
         })
@@ -102,21 +100,12 @@ impl TmuxClient {
         Ok(StateInferenceEngine::analyze(&content))
     }
 
-    /// Create a new session with isolated history
+    /// Create a new detached tmux session (agent launched by you inside)
     pub async fn create_session(&self, name: &str) -> Result<TmuxSession> {
-        let history_dir = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".agent-deck")
-            .join("history");
-
-        // Ensure history directory exists
-        tokio::fs::create_dir_all(&history_dir).await?;
-
-        let history_file = history_dir.join(format!("{}.hist", name));
-
         let output = Command::new(&self.tmux_path)
             .args(["new-session", "-d", "-s", name])
-            .env("HISTFILE", &history_file)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
             .output()
             .await
             .context("Failed to create tmux session")?;
@@ -126,7 +115,6 @@ impl TmuxClient {
             anyhow::bail!("Failed to create session: {}", stderr);
         }
 
-        // Get the session info
         let sessions = self.list_sessions().await?;
         sessions
             .into_iter()

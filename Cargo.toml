@@ -21,8 +21,7 @@ thiserror = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# File traversal
-walkdir = "2"
+# File traversal (.gitignore-aware)
 ignore = "0.4"
 
 # Regex with lazy initialization
@@ -35,6 +34,3 @@ arboard = "3"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Utilities
-dirs = "5"

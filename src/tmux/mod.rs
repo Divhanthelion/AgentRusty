@@ -2,7 +2,7 @@ mod client;
 mod heuristics;
 
 pub use client::TmuxClient;
-pub use heuristics::{AgentStatus, StateInferenceEngine};
+pub use heuristics::AgentStatus;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,20 +15,10 @@ pub struct TmuxSession {
     pub name: String,
     /// Unix timestamp when session was created
     pub created_at: u64,
-    /// Number of attached clients
+    /// Whether at least one client is attached
+    pub attached: bool,
+    /// Number of attached clients (best-effort)
     pub attached_clients: usize,
     /// Detected agent status
     pub status: AgentStatus,
-}
-
-impl TmuxSession {
-    pub fn new(id: String, name: String) -> Self {
-        Self {
-            id,
-            name,
-            created_at: 0,
-            attached_clients: 0,
-            status: AgentStatus::Unknown,
-        }
-    }
 }
